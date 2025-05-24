@@ -14,6 +14,7 @@ Pasos:
    (Este será el árbol AVL persistente)
 
 2. Para cada registro en 'records':
+   
    2.1. Extraer la clave a indexar usando el column_index
         clave = extract_field(record, column_index)
    2.2. Calcular la posición lógica del registro original:
@@ -21,4 +22,4 @@ Pasos:
    2.3. Insertar (clave, pos) en el archivo 'index-avl' manteniendo la estructura AVL
         (balancear si es necesario)
 
-3. Guardar cambios y cerrar el archivo
+4. Guardar cambios y cerrar el archivo
