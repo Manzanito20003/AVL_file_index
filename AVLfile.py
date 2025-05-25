@@ -1,335 +1,240 @@
 import struct
 import os
-from BST.Venta import FORMAT, Venta
 
-RECORD_SIZE = struct.calcsize(FORMAT) +4  # para altura
-class AVLFile:
-    def __init__(self, filename):
+
+
+class KeyHandler:
+    def __init__(self, tipo: str, size=20):
+        self.tipo = tipo
+        self.size = size
+
+    def serialize(self, key):
+        if self.tipo == 'int':
+            return struct.pack('i', key)
+        elif self.tipo == 'float':
+            return struct.pack('f', key)
+        elif self.tipo == 'str':
+            return key.encode('utf-8').ljust(self.size, b'\x00')
+
+    def deserialize(self, data):
+        if self.tipo == 'int':
+            return struct.unpack('i', data)[0]
+        elif self.tipo == 'float':
+            return struct.unpack('f', data)[0]
+        elif self.tipo == 'str':
+            return data.rstrip(b'\x00').decode('utf-8')
+
+    def compare(self, a, b):
+        return (a > b) - (a < b)
+
+class IndexNode:
+    def __init__(self, key, pos, left=-1, right=-1, height=1):
+        self.key = key
+        self.pos = pos
+        self.left = left
+        self.right = right
+        self.height = height
+
+    def to_bytes(self, key_handler: KeyHandler):
+        key_bytes = key_handler.serialize(self.key)
+        return key_bytes + struct.pack('iiii', self.pos, self.left, self.right, self.height)
+
+    @staticmethod
+    def from_bytes(data: bytes, key_handler: KeyHandler):
+        key_size = key_handler.size if key_handler.tipo == 'str' else 4
+        key = key_handler.deserialize(data[:key_size])
+        pos, left, right, height = struct.unpack('iiii', data[key_size:])
+        return IndexNode(key, pos, left, right, height)
+
+class AVLIndexFile:
+    def __init__(self, filename, key_handler: KeyHandler):
         self.filename = filename
+        self.key_handler = key_handler
+        self.record_size = (key_handler.size if key_handler.tipo == 'str' else 4) + 16
         if not os.path.exists(filename):
-            raise ValueError(f"El archivo {filename} no existe.")
-
-        with open(self.filename, "r+b") as file:
-            file.seek(0)
-            bytes_read = file.read(4)
-            if not bytes_read:
-                file.seek(0)
-                file.write(struct.pack("i", -1))  # raíz inicial
+            with open(filename, "wb") as f:
+                f.write(struct.pack("i", -1))
 
     def get_root(self):
-        """Devuelve la posición de la raíz del árbol AVL.  (4 bytes) para guardar el nodo raiz"""
-        with open(self.filename, "rb") as file:
-            file.seek(0)
-            root_pos = struct.unpack("i", file.read(4))[0]
-            return root_pos # retronamos la posicion de la raiz
+        with open(self.filename, "rb") as f:
+            return struct.unpack("i", f.read(4))[0]
 
     def set_root(self, pos):
-        """Actualiza la posición de la raíz del árbol AVL."""
-        with open(self.filename, "r+b") as file:
-            file.seek(0)
-            file.write(struct.pack("i", pos)) # actualizamos la raiz
+        with open(self.filename, "r+b") as f:
+            f.seek(0)
+            f.write(struct.pack("i", pos))
 
     def read_node(self, pos, file):
-        offset = 4 + pos * RECORD_SIZE
+        offset = 4 + pos * self.record_size
         file.seek(offset)
-        data = file.read(RECORD_SIZE)
-        venta_data = data[:-4]
-        altura_bytes = data[-4:]
-        venta, left, right = Venta.to_data(venta_data)
-        altura = struct.unpack("i", altura_bytes)[0]
-        return venta, altura, left, right
+        return IndexNode.from_bytes(file.read(self.record_size), self.key_handler)
 
-    def write_node(self, pos, venta, altura, left, right, file):
-        offset = 4 + pos * RECORD_SIZE
+    def write_node(self, pos, node, file):
+        offset = 4 + pos * self.record_size
         file.seek(offset)
+        file.write(node.to_bytes(self.key_handler))
 
-        venta.left = left
-        venta.right = right
+    def get_height(self, pos, file):
+        return self.read_node(pos, file).height if pos != -1 else 0
 
-        venta_bytes = venta.to_byte()
-        altura_bytes = struct.pack("i", altura)
-        file.write(venta_bytes + altura_bytes)
-
-    def insert(self, venta):
-        """Inserta una venta en el árbol AVL, reequilibrando si es necesario."""
-        with open(self.filename,"r+b")as file:
-            root_pos = self.get_root() #obtener la poss actual de la raiz del arbol
-
-            #llamar ala funcion de insercion recursiva, y balancea
-            new_root_pos = self._insert_rec(file, root_pos, venta)
-
-            #una vez insertado, update la raiz del tree
-            self.set_root(new_root_pos)
-
-
-    def _insert_rec(self, file, pos, venta):
-        """
-        Inserta recursivamente un nodo en el árbol AVL.
-        Retorna la nueva raíz del subárbol (posición lógica).
-        """
-        # Si el árbol está vacío, inserta el nuevo nodo.
-        if pos == -1:
-            file.seek(0,2)
-            new_pos= (file.tell()-4) // RECORD_SIZE #file.tell:total de bytes del archivo -4 por el header
-            # // dividimos por el Record y optenesmo el poss final
-            self.write_node(new_pos, venta, altura=1, left=-1, right=-1,file=file) # escribimos  el nuevo nodo.
-            return new_pos
-
-        venta_current,hight,left,right=self.read_node(pos,file)
-
-        if venta.id<venta_current.id:
-           new_left= self._insert_rec(file,left,venta) # nos moveos hasta el -1 pasadno el left del arbol
-           left= new_left # update con el nuevo pos para el left que fue retornado x el case base
-        elif venta.id> venta_current.id:
-            #similar logic
-            new_right= self._insert_rec(file,right,venta)
-            right =new_right
-        else:#si no entra ya existe
-            raise ValueError(f"El id {venta.id} ya esta registrado")
-
-        #calculo de la alutras
-        if left!=-1:#Si el hijo izquierdo existe
-            altura_left=self.read_node(left,file)[1] # sacamos la altura
-        else:
-            altura_left=0
-        if right!=-1:
-            altura_right=self.read_node(right,file)[1]
-        else:
-            altura_right=0
-
-        #update altura
-        altura=self.update_height(altura_left,altura_right)
-
-        #escribir el nodo actual
-        self.write_node(pos,venta_current,altura,left,right,file)
-
-        # Balancear el nodo actual si es necesario
-        return self.balance(file, pos)
-
-    def remove(self, id):
-        with open(self.filename, "r+b") as file:
-            root_pos = self.get_root()
-            new_root_pos = self._remove_rec(file, root_pos, id)
-            self.set_root(new_root_pos)
-
-    def _remove_rec(self, file, pos, id):
-        if pos == -1:
-            raise ValueError(f"ID {id} no encontrado.")
-
-        venta, altura, left, right = self.read_node(pos,file)
-
-        # 🔁 Buscar nodo a eliminar
-        if id < venta.id:
-            new_left = self._remove_rec(file, left, id)
-            left = new_left
-
-        elif id > venta.id:
-            new_right = self._remove_rec(file, right, id)
-            right = new_right
-
-        else:
-
-            # ✅ CASO 1: Nodo hoja
-            if left == -1 and right == -1:
-                return -1
-
-            # ✅ CASO 2: Un solo hijo
-            if left == -1:
-                return right
-            elif right == -1:
-                return left
-
-            # ✅ CASO 3: Dos hijos
-            # Buscar sucesor inorden (mínimo del subárbol derecho)
-            suc_pos = right
-            while True:
-                venta_suc, _, suc_left, _ = self.read_node(suc_pos,file)
-                if suc_left == -1:
-                    break
-                suc_pos = suc_left
-
-            # Leer el sucesor inorden completamente
-            venta_suc, altura_suc, left_suc, right_suc = self.read_node(suc_pos,file)
-
-            # Sustituir el nodo actual con el sucesor
-            venta = venta_suc
-            right = self._remove_rec(file, right, venta_suc.id)  # eliminar el sucesor original
-
-        # 🔄 Recalcular altura
-        altura_izq = self.read_node(left,file)[1] if left != -1 else 0
-        altura_der = self.read_node(right,file)[1] if right != -1 else 0
-        altura = self.update_height(altura_izq, altura_der)
-
-        # 💾 Guardar el nodo actualizado
-        self.write_node(pos, venta, altura, left, right,file)
-
-        return self.balance(file, pos)
-
-    def balance_factor(self, altura_izq, altura_der):
-        """
-        Retorna el factor de balanceo: altura_izquierda - altura_derecha.
-        Si es > 1 o < -1, el nodo está desbalanceado.
-        """
-        return altura_izq - altura_der
-
-    def update_height(self, altura_izq, altura_der):
-        """
-        retorna la nueva altura del nodo actual
-        a partir de las alturas de sus hijos.
-        """
-        return 1 + max(altura_izq, altura_der)
-
-    def rotate_left(self, file, pos):
-        """
-        Rotación simple a la izquierda.
-        `pos` es la posición del nodo A.
-        Devuelve la nueva raíz del subárbol (posición de B).
-        """
-        # Nodo A (raíz actual del subárbol)
-        venta_a, altura_a, left_a, right_a = self.read_node(pos,file)
-
-        # Nodo B (hijo derecho de A)
-        venta_b, altura_b, left_b, right_b = self.read_node(right_a,file)
-
-        # A se convierte en hijo izquierdo de B
-        new_right_a = left_b  # El hijo izquierdo de B pasa a ser hijo derecho de A
-        new_left_b = pos  # A se convierte en hijo izquierdo de B
-
-        # Recalcular alturas
-        altura_izq_a = self.read_node(left_a,file)[1] if left_a != -1 else 0
-        altura_der_a = self.read_node(new_right_a,file)[1] if new_right_a != -1 else 0
-        altura_a = self.update_height(altura_izq_a, altura_der_a)
-
-        altura_izq_b = self.update_height(altura_a, self.read_node(right_b,file)[1] if right_b != -1 else 0)
-
-        # Reescribir nodo A con nuevos enlaces
-        self.write_node(pos, venta_a, altura_a, left_a, new_right_a,file)
-
-        # Reescribir nodo B con nuevos enlaces
-        self.write_node(right_a, venta_b, altura_izq_b, new_left_b, right_b,file)
-
-        # Nueva raíz del subárbol
-        return right_a
+    def balance_factor(self, node, file):
+        return self.get_height(node.left, file) - self.get_height(node.right, file)
 
     def rotate_right(self, file, pos):
-        """
-        Rotación simple a la derecha.
-        `pos` es la posición del nodo A.
-        Devuelve la nueva raíz del subárbol (posición de B).
-        """
-        # Nodo A
-        venta_a, altura_a, left_a, right_a = self.read_node(pos,file)
+        y = self.read_node(pos, file)
+        x = self.read_node(y.left, file)
+        x_pos = y.left
+        y.left = x.right
+        x.right = pos
+        y.height = 1 + max(self.get_height(y.left, file), self.get_height(y.right, file))
+        x.height = 1 + max(self.get_height(x.left, file), self.get_height(x.right, file))
+        self.write_node(pos, y, file)
+        self.write_node(x_pos, x, file)
+        return x_pos
 
-        # Nodo B (hijo izquierdo de A)
-        venta_b, altura_b, left_b, right_b = self.read_node(left_a,file)
-
-        # A se convierte en hijo derecho de B
-        new_left_b = left_b
-        new_right_b = pos  # A pasa a ser hijo derecho de B
-
-        # El hijo derecho de B pasa a ser el hijo izquierdo de A
-        new_left_a = right_b  # Este era right de B, ahora será left de A
-
-        # Recalcular alturas
-        altura_izq_a = self.read_node(new_left_a,file)[1] if new_left_a != -1 else 0
-        altura_der_a = self.read_node(right_a,file)[1] if right_a != -1 else 0
-        altura_a = self.update_height(altura_izq_a, altura_der_a)
-
-        altura_izq_b = self.read_node(new_left_b,file)[1] if new_left_b != -1 else 0
-        altura_der_b = self.update_height(altura_izq_b, altura_a)
-
-        # Escribir nodo A actualizado
-        self.write_node(pos, venta_a, altura_a, new_left_a, right_a,file)
-
-        # Escribir nodo B actualizado en su misma posición
-        self.write_node(left_a, venta_b, altura_der_b, new_left_b, new_right_b,file)
-
-        # Retornar nueva raíz del subárbol
-        return left_a
+    def rotate_left(self, file, pos):
+        x = self.read_node(pos, file)
+        y = self.read_node(x.right, file)
+        y_pos = x.right
+        x.right = y.left
+        y.left = pos
+        x.height = 1 + max(self.get_height(x.left, file), self.get_height(x.right, file))
+        y.height = 1 + max(self.get_height(y.left, file), self.get_height(y.right, file))
+        self.write_node(pos, x, file)
+        self.write_node(y_pos, y, file)
+        return y_pos
 
     def balance(self, file, pos):
-        """
-        Verifica el factor de balanceo de un nodo en `pos` y aplica rotaciones si es necesario.
-        Retorna la nueva posición raíz del subárbol balanceado.
-        """
-        venta, altura, left, right = self.read_node(pos,file)
+        node = self.read_node(pos, file)
+        bf = self.balance_factor(node, file)
 
-        # Obtener alturas de los hijos
-        altura_izq = self.read_node(left,file)[1] if left != -1 else 0
-        altura_der = self.read_node(right,file)[1] if right != -1 else 0
-
-        bf = self.balance_factor(altura_izq, altura_der)
-
-        # Caso LL (rotación simple a la derecha)
         if bf > 1:
-            hijo_izq = self.read_node(left,file)
-            altura_hi_izq = self.read_node(hijo_izq[2],file)[1] if hijo_izq[2] != -1 else 0
-            altura_hi_der = self.read_node(hijo_izq[3],file)[1] if hijo_izq[3] != -1 else 0
-            if altura_hi_izq >= altura_hi_der:
-                return self.rotate_right(file, pos)
-            else:
-                # LR
-                new_left = self.rotate_left(file, left)
-                self.write_node(pos, venta, altura, new_left, right,file)
-                return self.rotate_right(file, pos)
+            left = self.read_node(node.left, file)
+            if self.balance_factor(left, file) < 0:
+                node.left = self.rotate_left(file, node.left)
+                self.write_node(pos, node, file)
+            return self.rotate_right(file, pos)
 
-        # Caso RR (rotación simple a la izquierda)
         if bf < -1:
-            hijo_der = self.read_node(right,file)
-            altura_hd_izq = self.read_node(hijo_der[2],file)[1] if hijo_der[2] != -1 else 0
-            altura_hd_der = self.read_node(hijo_der[3],file)[1] if hijo_der[3] != -1 else 0
-            if altura_hd_der >= altura_hd_izq:
-                return self.rotate_left(file, pos)
-            else:
-                # RL
-                new_right = self.rotate_right(file, right)
-                self.write_node(pos, venta, altura, left, new_right,file)
-                return self.rotate_left(file, pos)
+            right = self.read_node(node.right, file)
+            if self.balance_factor(right, file) > 0:
+                node.right = self.rotate_right(file, node.right)
+                self.write_node(pos, node, file)
+            return self.rotate_left(file, pos)
 
-        # Ya está balanceado
         return pos
 
-    def search(self, id):
-        """
-        Busca un nodo con el ID especificado.
-        Retorna True si existe, False en caso contrario.
-        """
+    def insert(self, key, pos_dato):
+        with open(self.filename, "r+b") as file:
+            root = self.get_root()
+            new_root = self._insert_rec(file, root, key, pos_dato)
+            self.set_root(new_root)
+
+    def _insert_rec(self, file, pos, key, pos_dato):
+        if pos == -1:
+            file.seek(0, 2)
+            new_pos = (file.tell() - 4) // self.record_size
+            node = IndexNode(key, pos_dato)
+            self.write_node(new_pos, node, file)
+            return new_pos
+
+        node = self.read_node(pos, file)
+        cmp = self.key_handler.compare(key, node.key)
+
+        if cmp < 0:
+            node.left = self._insert_rec(file, node.left, key, pos_dato)
+        elif cmp > 0:
+            node.right = self._insert_rec(file, node.right, key, pos_dato)
+        else:
+            raise ValueError(f"Clave duplicada: {key}")
+
+        node.height = 1 + max(self.get_height(node.left, file), self.get_height(node.right, file))
+        self.write_node(pos, node, file)
+        return self.balance(file, pos)
+
+    # Search
+    def search(self, key):
         with open(self.filename, "rb") as file:
-            pos = self.get_root()
+            return self._search_rec(file, self.get_root(), key)
 
-            while pos != -1:
-                venta, altura, left, right = self.read_node(pos,file)
+    def _search_rec(self, file, pos, key):
+        if pos == -1:
+            return None
+        node = self.read_node(pos, file)
+        cmp = self.key_handler.compare(key, node.key)
+        if cmp == 0:
+            return node
+        elif cmp < 0:
+            return self._search_rec(file, node.left, key)
+        else:
+            return self._search_rec(file, node.right, key)
 
-                if id == venta.id:
-                    return True
-                elif id < venta.id:
-                    pos = left
-                else:
-                    pos = right
-
-            return False
-
-    def search_range(self, id_min, id_max):
+    # Range search
+    def range_search(self, key_low, key_high):
+        results = []
         with open(self.filename, "rb") as file:
-            results = []
-            self._search_range_rec(file, self.get_root(), id_min, id_max, results)
-            return results
+            self._range_search_rec(file, self.get_root(), key_low, key_high, results)
+        return results
 
-    def _search_range_rec(self, file, pos, id_min, id_max, results):
+    def _range_search_rec(self, file, pos, key_low, key_high, results):
         if pos == -1:
             return
+        node = self.read_node(pos, file)
+        if self.key_handler.compare(key_low, node.key) < 0:
+            self._range_search_rec(file, node.left, key_low, key_high, results)
+        if self.key_handler.compare(key_low, node.key) <= 0 and self.key_handler.compare(node.key, key_high) <= 0:
+            results.append((node.key, node.pos))
+        if self.key_handler.compare(node.key, key_high) < 0:
+            self._range_search_rec(file, node.right, key_low, key_high, results)
 
-        venta, altura, left, right = self.read_node(pos,file)
+    # Delete
+    def delete(self, key):
+        with open(self.filename, "r+b") as file:
+            root = self.get_root()
+            new_root = self._delete_rec(file, root, key)
+            self.set_root(new_root)
 
-        # Si puede haber valores válidos a la izquierda
-        if venta.id > id_min:
-            self._search_range_rec(file, left, id_min, id_max, results)
+    def _delete_rec(self, file, pos, key):
+        if pos == -1:
+            return -1
 
-        # Si está en el rango, lo agregamos
-        if id_min <= venta.id <= id_max:
-            results.append(venta)
+        node = self.read_node(pos, file)
+        cmp = self.key_handler.compare(key, node.key)
 
-        # Si puede haber valores válidos a la derecha
-        if venta.id < id_max:
-            self._search_range_rec(file, right, id_min, id_max, results)
+        if cmp < 0:
+            node.left = self._delete_rec(file, node.left, key)
+        elif cmp > 0:
+            node.right = self._delete_rec(file, node.right, key)
+        else:
+            if node.left == -1:
+                return node.right
+            elif node.right == -1:
+                return node.left
 
+            min_larger_pos, min_larger_node = self._get_min_node(file, node.right)
+            node.key, node.pos = min_larger_node.key, min_larger_node.pos
+            node.right = self._delete_rec(file, node.right, min_larger_node.key)
+
+        node.height = 1 + max(self.get_height(node.left, file), self.get_height(node.right, file))
+        self.write_node(pos, node, file)
+        return self.balance(file, pos)
+
+    def _get_min_node(self, file, pos):
+        current_pos = pos
+        current_node = self.read_node(current_pos, file)
+        while current_node.left != -1:
+            current_pos = current_node.left
+            current_node = self.read_node(current_pos, file)
+        return current_pos, current_node
+
+
+def create_index_avl(records, atribute_index, type):
+    try:
+        KEY_HANDLER = KeyHandler(tipo=type)  # tipo del key
+        FILENAME = f"index_avl_{atribute_index}.dat"
+        avl = AVLIndexFile(FILENAME, KEY_HANDLER)
+        for i, record in enumerate(records):
+            avl.insert(record.to_dict()[atribute_index], i)
+        print(f"Índice AVL creado exitosamente en {FILENAME}")
+    except Exception as e:
+        print(f"Error al crear el índice AVL: {e}")
